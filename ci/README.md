@@ -73,5 +73,4 @@ MySQL server。
 
 默认支持任何 8.4.x：手动触发时把 `mysql_version` 改掉即可，偏移会自动
 重新提取。如果目标版本改动了 `THD` 布局或插件依赖的 API，编译或自测会
-直接失败，日志里有具体原因（日志在 Actions 里，同时会推到 `ci-reports`
-分支方便查看）。
+直接失败，失败原因看对应 run 的 `build-log` artifact 或展开的日志。

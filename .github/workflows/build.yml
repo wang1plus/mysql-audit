@@ -120,47 +120,7 @@ jobs:
 
 
   # ---------------------------------------------------------------------------
-  # 3) 把构建日志回传（仅用于在无 GitHub 登录环境下排查；失败也能看到日志）
-  # ---------------------------------------------------------------------------
-  relay-logs:
-    name: relay logs
-    needs: [offsets, build]
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          path: /tmp/logs
-
-      - name: push logs to ci-reports branch
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          find /tmp/logs -type f || true
-          mkdir -p /tmp/out
-          # 汇总所有 *.log / *.txt
-          find /tmp/logs -type f \( -name '*.log' -o -name '*.txt' \) -exec cat {} + > /tmp/out/all.log 2>/dev/null || true
-          [ -s /tmp/out/all.log ] || { echo "no logs"; exit 0; }
-          wc -l /tmp/out/all.log
-
-          cd /tmp/out
-          git init -q .
-          git config user.name "ci-bot"
-          git config user.email "ci-bot@users.noreply.github.com"
-          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git fetch -q --depth 1 origin ci-reports && git checkout -q -B ci-reports FETCH_HEAD || git checkout -q -B ci-reports
-          mkdir -p ci-reports
-          cp all.log "ci-reports/run-${GITHUB_RUN_NUMBER}-build.log"
-          git add -f ci-reports
-          git commit -q -m "ci logs: run ${GITHUB_RUN_NUMBER} (${GITHUB_SHA:0:8})" || true
-          git push -q origin ci-reports
-          echo "pushed ci-reports/run-${GITHUB_RUN_NUMBER}-build.log"
-
-  # ---------------------------------------------------------------------------
-  # 4) 发布到 Release
+  # 3) 发布到 Release
   # ---------------------------------------------------------------------------
   release:
     name: publish release

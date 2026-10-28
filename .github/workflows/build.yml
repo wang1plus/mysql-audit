@@ -90,9 +90,8 @@ jobs:
 
       - name: toolchain info
         run: |
-          cat /etc/os-release | head -3
-          ldd --version | head -1
-          gcc --version | head -1 || true
+          sed -n '1,3p' /etc/os-release
+          ldd --version | sed -n 1p
 
       - name: build
         env:

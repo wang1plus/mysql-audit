@@ -1,0 +1,236 @@
+name: build
+
+on:
+  # 手动触发：可选版本、是否发 Release
+  workflow_dispatch:
+    inputs:
+      mysql_version:
+        description: "MySQL 版本（8.4.x）"
+        required: false
+        default: "8.4.13"
+      publish_release:
+        description: "构建成功后发布到 GitHub Release"
+        type: boolean
+        default: true
+      release_tag:
+        description: "Release tag（留空则用 v<mysql>-<run_number>）"
+        required: false
+        default: ""
+
+  # 打 tag 自动构建 + 发布
+  push:
+    tags:
+      - "v*"
+
+  # PR 上只做验证，不发布
+  pull_request:
+    paths:
+      - "src/**"
+      - "include/**"
+      - "config/**"
+      - "configure.ac"
+      - "ci/**"
+      - ".github/workflows/build.yml"
+
+
+permissions:
+  contents: write
+
+env:
+  MYSQL_VERSION: ${{ inputs.mysql_version || '8.4.13' }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1) 从官方 mysqld 提取 THD 偏移（官方 tarball 的 mysqld 带 DWARF）
+  # ---------------------------------------------------------------------------
+  offsets:
+    name: extract offsets
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      row: ${{ steps.extract.outputs.row }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gdb xz-utils
+
+      - name: extract
+        id: extract
+        env:
+          MYSQL_VERSION: ${{ env.MYSQL_VERSION }}
+        run: |
+          set -euo pipefail
+          bash ci/job-offsets.sh
+          row="$(cat offsets-out/offsets-row.txt)"
+          echo "offset row: $row"
+          echo "row=$row" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: offsets
+          path: offsets-out/
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # 2) 在 openEuler 24.03 LTS-SP4 容器里编译 + 真实加载自测 + 打包
+  # ---------------------------------------------------------------------------
+  build:
+    name: build & smoke test
+    needs: [offsets]
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/openeuler/openeuler:24.03-lts-sp4
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: toolchain info
+        run: |
+          cat /etc/os-release | head -3
+          ldd --version | head -1
+          gcc --version | head -1 || true
+
+      - name: build
+        env:
+          MYSQL_VERSION: ${{ env.MYSQL_VERSION }}
+          OFFSETS_ROW: ${{ needs.offsets.outputs.row }}
+        # 上游 offsets 提取失败时也让 build 报错，避免出现“看似成功”的空产物
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$OFFSETS_ROW" > /tmp/offsets-row.txt
+          bash ci/job-build.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-log
+          path: /tmp/ci-build.log
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: mysql-audit-pkg
+          path: dist/
+          if-no-files-found: error
+
+
+  # ---------------------------------------------------------------------------
+  # 3) 把构建日志回传（仅用于在无 GitHub 登录环境下排查；失败也能看到日志）
+  # ---------------------------------------------------------------------------
+  relay-logs:
+    name: relay logs
+    needs: [offsets, build]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          path: /tmp/logs
+
+      - name: push logs to ci-reports branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          find /tmp/logs -type f || true
+          mkdir -p /tmp/out
+          # 汇总所有 *.log / *.txt
+          find /tmp/logs -type f \( -name '*.log' -o -name '*.txt' \) -exec cat {} + > /tmp/out/all.log 2>/dev/null || true
+          [ -s /tmp/out/all.log ] || { echo "no logs"; exit 0; }
+          wc -l /tmp/out/all.log
+
+          cd /tmp/out
+          git init -q .
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth 1 origin ci-reports && git checkout -q -B ci-reports FETCH_HEAD || git checkout -q -B ci-reports
+          mkdir -p ci-reports
+          cp all.log "ci-reports/run-${GITHUB_RUN_NUMBER}-build.log"
+          git add -f ci-reports
+          git commit -q -m "ci logs: run ${GITHUB_RUN_NUMBER} (${GITHUB_SHA:0:8})" || true
+          git push -q origin ci-reports
+          echo "pushed ci-reports/run-${GITHUB_RUN_NUMBER}-build.log"
+
+  # ---------------------------------------------------------------------------
+  # 4) 发布到 Release
+  # ---------------------------------------------------------------------------
+  release:
+    name: publish release
+    needs: [build]
+    if: |
+      always() && needs.build.result == 'success' && (
+        startsWith(github.ref, 'refs/tags/') ||
+        (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: mysql-audit-pkg
+          path: dist
+
+      - name: resolve tag
+        id: tag
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          elif [ -n "${{ inputs.release_tag }}" ]; then
+            tag="${{ inputs.release_tag }}"
+          else
+            tag="v${{ env.MYSQL_VERSION }}-${{ github.run_number }}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "tag: $tag"
+
+      - name: create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          MYSQL_VERSION: ${{ env.MYSQL_VERSION }}
+        run: |
+          set -euo pipefail
+          ls -l dist
+          cat > /tmp/notes.md <<EOF
+          MySQL ${MYSQL_VERSION} 的 AUDIT 审计插件，在 openEuler 24.03 LTS-SP4 容器内编译
+          （glibc 2.38 / gcc 12.3），并用官方 MySQL ${MYSQL_VERSION} 二进制做过加载与审计日志自测。
+
+          - 目标平台：x86_64 / openEuler 24.03 LTS-SP4
+          - THD 偏移：从官方 mysql-${MYSQL_VERSION}-linux-glibc2.28-x86_64 的 mysqld 自动提取
+          - 自测内容：插件 ACTIVE 状态、CREATE/INSERT/GRANT 均写入 audit JSON 日志
+
+          ## 安装
+
+          \`\`\`bash
+          cp libaudit_plugin.so \$(mysql -uroot -p -N -e "select @@plugin_dir;")/
+          \`\`\`
+
+          然后在 my.cnf 加：
+
+          \`\`\`ini
+          [mysqld]
+          plugin-load-add     = AUDIT=libaudit_plugin.so
+          audit_json_file     = ON
+          audit_json_log_file = /var/log/mysql/mysql-audit.json
+          \`\`\`
+
+          详细步骤见包内 \`INSTALL.md\`。
+          EOF
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "mysql-audit for MySQL ${MYSQL_VERSION} (openEuler 24.03 LTS-SP4)" \
+              --notes-file /tmp/notes.md
+          fi

@@ -1,0 +1,31 @@
+# MySQL AUDIT 插件配置示例（MySQL @MYSQL_VERSION@ on openEuler 24.03 LTS-SP4）
+#
+# 合并到 /etc/my.cnf 的 [mysqld] 段，或使用 --defaults-file 指定。
+
+[mysqld]
+# ---- 加载插件 ----
+plugin-load-add            = AUDIT=libaudit_plugin.so
+
+# ---- 审计输出 ----
+audit_json_file            = ON
+audit_json_log_file        = /var/log/mysql/mysql-audit.json
+# audit_json_file_flush 是 NOCMDOPT 变量，不能写在 my.cnf 里，改用 SQL：
+#   SET GLOBAL audit_json_file_flush=1;
+audit_json_file_bufsize    = 262144
+
+# ---- 记录范围 ----
+# 记录哪些命令（留空 = 全部）
+audit_record_cmds          = connect,quit,query,create,alter,drop,rename,truncate,grant,revoke,insert,update,delete,select
+# 记录哪些对象的操作（留空 = 全部），例如只关心某个库
+#audit_record_objs         = mydb.*
+# 白名单用户（这些用户的操作不记录）
+#audit_whitelist_users     = monitoring
+
+# ---- 偏移与校验 ----
+# 默认按 mysqld 的 md5 匹配内置偏移表；匹配不上时按版本匹配并做运行时校验
+audit_validate_checksum    = ON
+audit_offsets_by_version   = ON
+audit_validate_offsets_extended = ON
+
+# 若你的 mysqld 与内置偏移不匹配，可以手工指定（不推荐长期这样）：
+#audit_offsets             = 9512, 9552, 5024, 6452, 1280, 0, 0, 32, 64, 160, 1368, 9652, 6072, 4328, 4336, 4340, 7736, 1592, 32, 8696, 8736, 8720, 13032, 140, 668, 344

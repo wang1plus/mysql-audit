@@ -43,3 +43,16 @@ See the GNU General Public License for more details.
 See COPYING file for a copy of the GPL Version 2 license.
 
 <sup>*</sup> Other trademarks and brands may be claimed as the property of others.
+
+
+## 在 openEuler 24.03 LTS-SP4 上构建（MySQL 8.4.x）
+
+本仓库带一条 GitHub Actions 流水线，在 openEuler 24.03 LTS-SP4 容器里完成
+编译、真实 mysqld 加载自测和打包发布，不需要本地环境：
+
+- 手动触发：Actions → **build** → Run workflow（可指定 MySQL 版本）
+- 打 tag（`v*`）自动构建并发布到 Release
+
+产物包含 `libaudit_plugin.so`、安装说明 `INSTALL.md` 和 `my.cnf` 示例。
+构建细节和脚本职责见 [ci/README.md](ci/README.md)，
+安装步骤见 [ci/INSTALL.md](ci/INSTALL.md)。
